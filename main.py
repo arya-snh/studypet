@@ -1,27 +1,33 @@
-from PIL import Image, ImageDraw
-import face_recognition
+"""
+Demonstration of the GazeTracking library.
+Check the README.md for complete documentation.
+"""
 
-# Load the jpg file into a numpy array
-image = face_recognition.load_image_file("pictures/unknown/me.JPG")
+import cv2
+from gaze_tracking import GazeTracking
 
-# Find all facial features in all the faces in the image
-face_landmarks_list = face_recognition.face_landmarks(image)
+gaze = GazeTracking()
+webcam = cv2.VideoCapture(0)
 
-print("I found {} face(s) in this photograph!".format(len(face_landmarks_list)))
+while True:
+    # We get a new frame from the webcam
+    _, frame = webcam.read()
 
-# Create a PIL imagedraw object so we can draw on the picture
-pil_image = Image.fromarray(image)
-d = ImageDraw.Draw(pil_image)
+    # We send this frame to GazeTracking to analyze it
+    gaze.refresh(frame)
 
-for face_landmarks in face_landmarks_list:
+    frame = gaze.annotated_frame()
+    text = ""
+    user_is_distracted = gaze.is_left() or gaze.is_right() or (gaze.pupil_left_coords() == None) or (gaze.pupil_right_coords() == None)
+    if user_is_distracted:
+        print("DISTRCTED")
+    else:
+        text = "FOCUSED"
 
-    # Print the location of each facial feature in this image
-    for facial_feature in face_landmarks.keys():
-        print("The {} in this face has the following points: {}".format(facial_feature, face_landmarks[facial_feature]))
+    cv2.imshow("Demo", frame)
 
-    # Let's trace out each facial feature in the image with a line!
-    for facial_feature in face_landmarks.keys():
-        d.line(face_landmarks[facial_feature], width=5)
-
-# Show the picture
-pil_image.show()
+    if cv2.waitKey(1) == 27:
+        break
+   
+webcam.release()
+cv2.destroyAllWindows()
