@@ -1,61 +1,175 @@
-import face_recognition
+import sys
 import cv2
+import time
+import threading
+import signal
+from PyQt6.QtWidgets import QApplication, QLabel
+from PyQt6.QtCore import Qt, pyqtSignal, QThread, QCoreApplication
+from PyQt6.QtGui import QMovie, QGuiApplication
 
-# This is a demo of blurring faces in video.
+from gaze_tracking import GazeTracking
 
-# PLEASE NOTE: This example requires OpenCV (the `cv2` library) to be installed only to read from your webcam.
-# OpenCV is *not* required to use the face_recognition library. It's only required if you want to run this
-# specific demo. If you have trouble installing it, try any of the other demos that don't require it instead.
+gaze = GazeTracking()
 
-# Get a reference to webcam #0 (the default one)
-video_capture = cv2.VideoCapture(0)
+def is_user_distracted(frame):
+    gaze.refresh(frame)
+    distracted = (
+        gaze.is_left() or
+        gaze.is_right() or
+        gaze.pupil_left_coords() is None or
+        gaze.pupil_right_coords() is None
+    )
+    return distracted
 
-# Initialize some variables
-face_locations = []
+class PetWindow(QLabel):
+    def __init__(self):
+        super().__init__()
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-while True:
-    # Grab a single frame of video
-    ret, frame = video_capture.read()
+        self.movie = QMovie("pictures/cat.gif")
+        if not self.movie.isValid():
+            print("Warning: cat.gif not found or invalid — pet will use fallback size")
 
-    if not ret or frame is None or frame.size == 0:
-        print("Warning: empty frame captured. Retrying...")
-        # small delay to let camera warm up
-        cv2.waitKey(100)
-        # Try re-opening if camera not opened
-        if not video_capture.isOpened():
-            video_capture.open(0)
-        continue
+        self.setMovie(self.movie)
+        self.movie.start()
 
-    # Resize frame of video to 1/4 size for faster face detection processing
-    small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
+        rect = self.movie.frameRect()
+        if rect.isEmpty():
+            self.setFixedSize(200, 200)   # fallback size
+        else:
+            self.setFixedSize(rect.size())
 
-    # Find all the faces and face encodings in the current frame of video
-    face_locations = face_recognition.face_locations(small_frame, model="cnn")
+        screen = QGuiApplication.primaryScreen()
+        if screen:
+            geom = screen.availableGeometry()
+            x = geom.right() - self.width() - 20
+            y = geom.bottom() - self.height() - 60
+            self.move(x, y)
 
-    # Display the results
-    for top, right, bottom, left in face_locations:
-        # Scale back up face locations since the frame we detected in was scaled to 1/4 size
-        top *= 4
-        right *= 4
-        bottom *= 4
-        left *= 4
+        self.drag_pos = None
+        self._locked_visible = False
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-        # Extract the region of the image that contains the face
-        face_image = frame[top:bottom, left:right]
+    def mousePressEvent(self, event):
+        self.drag_pos = event.globalPosition().toPoint()
 
-        # Blur the face image
-        face_image = cv2.GaussianBlur(face_image, (99, 99), 30)
+    def mouseMoveEvent(self, event):
+        if self.drag_pos:
+            self.move(self.pos() + event.globalPosition().toPoint() - self.drag_pos)
+            self.drag_pos = event.globalPosition().toPoint()
 
-        # Put the blurred face region back into the frame image
-        frame[top:bottom, left:right] = face_image
+    def mouseReleaseEvent(self, event):
+        self.drag_pos = None
 
-    # Display the resulting image
-    cv2.imshow('Video', frame)
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.user_close()
+            return
+        super().keyPressEvent(event)
 
-    # Hit 'q' on the keyboard to quit!
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+    def show(self):
+        super().show()
+        self._locked_visible = True
+        self.setFocus()
 
-# Release handle to the webcam
-video_capture.release()
-cv2.destroyAllWindows()
+    def hide(self):
+        if self._locked_visible:
+            print("DEBUG: hide() ignored because pet is locked (only user can close)")
+            return
+        super().hide()
+
+    def user_close(self):
+        self._locked_visible = False
+        super().hide()
+
+    def closeEvent(self, event):
+        event.ignore()
+        super().hide()
+
+
+class AttentionThread(QThread):
+    distracted_changed = pyqtSignal(bool)
+
+    def __init__(self, parent=None, interval_s=2.0):
+        super().__init__(parent)
+        self._running = True
+        self.interval_s = interval_s
+        self.gaze = GazeTracking()
+
+    def run(self):
+        cap = cv2.VideoCapture(0)
+        prev = None
+        while self._running:
+            ret, frame = cap.read()
+            if not ret or frame is None or frame.size == 0:
+                # small sleep to avoid busy loop; let camera warm up
+                self.msleep(100)
+                continue
+
+            # analyze frame (use same logic as is_user_distracted)
+            self.gaze.refresh(frame)
+            distracted = (
+                self.gaze.is_left() or
+                self.gaze.is_right() or
+                self.gaze.pupil_left_coords() is None or
+                self.gaze.pupil_right_coords() is None
+            )
+
+            if prev is None or distracted != prev:
+                self.distracted_changed.emit(distracted)
+                prev = distracted
+
+            # sleep interval (seconds)
+            for _ in range(int(self.interval_s * 10)):
+                if not self._running:
+                    break
+                self.msleep(100)
+        cap.release()
+
+    def stop(self):
+        self._running = False
+
+app = QApplication(sys.argv)
+pet = PetWindow()
+
+print("DEBUG: movie.isValid =", pet.movie.isValid())
+print("DEBUG: movie.frameRect =", pet.movie.frameRect())
+print("DEBUG: movie.frameCount =", pet.movie.frameCount())
+pet.show()
+pet.raise_()
+pet.activateWindow()
+print("DEBUG: pet.isVisible() after show() ->", pet.isVisible(), "geometry:", pet.geometry())
+QCoreApplication.processEvents()
+
+attention_thread = AttentionThread()
+
+def on_distracted(distracted: bool):
+    if distracted:
+        print("DISTRACTED → Showing pet 🐶")
+        pet.show()
+    else:
+        print("FOCUSED 😌")
+
+attention_thread.distracted_changed.connect(on_distracted)
+attention_thread.start()
+
+def clean_shutdown():
+    attention_thread.stop()
+    attention_thread.wait(2000)
+
+app.aboutToQuit.connect(clean_shutdown)
+
+def handle_sigint(sig, frame):
+    print("SIGINT received — quitting")
+    QCoreApplication.quit()
+
+signal.signal(signal.SIGINT, handle_sigint)
+
+exit_code = app.exec()
+clean_shutdown()
+sys.exit(exit_code)
